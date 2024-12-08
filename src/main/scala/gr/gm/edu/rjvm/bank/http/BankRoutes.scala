@@ -6,12 +6,15 @@ import akka.http.scaladsl.model.headers.Location
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.util.Timeout
+import cats.data.Validated.{Invalid, Valid}
 import gr.gm.edu.rjvm.bank.actors.PersistentBankAccount.Command._
 import gr.gm.edu.rjvm.bank.actors.PersistentBankAccount.Response._
 import gr.gm.edu.rjvm.bank.actors.PersistentBankAccount.{Command, Response}
 import gr.gm.edu.rjvm.bank.dto.Requests.{BankAccountCreationRequest, BankAccountUpdateRequest, FailureResponse}
+import gr.gm.edu.rjvm.bank.http.Validation.{Validator, validateEntity}
 
 import scala.concurrent.Future
+import scala.util.{Failure, Success}
 // this will make all case classes (de-)serializable
 import io.circe.generic.auto._
 // adds akka-http compatibility
@@ -25,14 +28,23 @@ class BankRoutes(bank: ActorRef[Command])(implicit system: ActorSystem[_]) {
 
   implicit val timeout: Timeout = Timeout(5.seconds)
 
-  def createBankAccount(request: BankAccountCreationRequest): Future[Response] =
+  private def createBankAccount(request: BankAccountCreationRequest): Future[Response] =
     bank.ask(replyTo => request.toCommand(replyTo))
 
-  def getBankAccount(id: String): Future[Response] =
+  private def getBankAccount(id: String): Future[Response] =
     bank.ask(replyTo => GetBankAccount(id, replyTo))
 
-  def updateBankAccount(id: String, request: BankAccountUpdateRequest): Future[Response] =
+  private def updateBankAccount(id: String, request: BankAccountUpdateRequest): Future[Response] =
     bank.ask(replyTo => request.toCommand(id, replyTo))
+
+  private def validateRequest[R: Validator](request: R)(routeIfValid: Route): Route =
+    validateEntity(request) match {
+      case Valid(_) =>
+        routeIfValid
+      case Invalid(failures) =>
+        val err = failures.toList.map(_.errorMessage).mkString(",")
+        complete(StatusCodes.BadRequest, FailureResponse(err))
+    }
 
   /*
     POST /bank/
@@ -60,18 +72,20 @@ class BankRoutes(bank: ActorRef[Command])(implicit system: ActorSystem[_]) {
         post {
           // parse the payload
           entity(as[BankAccountCreationRequest]) { request =>
-            /*
-               1. convert request into command for the bank actor
-               2. send the command to bank
-               3. expect reply
-               4. send back a response, based on the reply
+            validateRequest(request) {
+              /*
+                 1. convert request into command for the bank actor
+                 2. send the command to bank
+                 3. expect reply
+                 4. send back a response, based on the reply
 
-             */
-            onSuccess(createBankAccount(request)) {
-              case BankAccountCreatedResponse(id) =>
-                respondWithHeader(Location(s"/bank/$id")) {
-                  complete(StatusCodes.Created)
-                }
+               */
+              onSuccess(createBankAccount(request)) {
+                case BankAccountCreatedResponse(id) =>
+                  respondWithHeader(Location(s"/bank/$id")) {
+                    complete(StatusCodes.Created)
+                  }
+              }
             }
           }
         }
@@ -90,23 +104,25 @@ class BankRoutes(bank: ActorRef[Command])(implicit system: ActorSystem[_]) {
                 complete(StatusCodes.NotFound, FailureResponse(s"Bank account $id cannot be found"))
             }
           } ~
-          put {
-            /*
-               - transform the request to a Command
-               - send the command to the bank
-               - expect a reply
-               - send back a http response
-             */
-            // todo validate request
-            entity(as[BankAccountUpdateRequest]) { request =>
-              onSuccess(updateBankAccount(id, request)) {
-                case BankAccountBalanceUpdatedResponse(Some(account)) =>
-                  complete(StatusCodes.OK, account)
-                case BankAccountBalanceUpdatedResponse(None) =>
-                  complete(StatusCodes.NotFound, FailureResponse(s"Bank account $id cannot be found"))
+            put {
+              /*
+                 - transform the request to a Command
+                 - send the command to the bank
+                 - expect a reply
+                 - send back a http response
+               */
+              // todo validate request
+              entity(as[BankAccountUpdateRequest]) { request =>
+                validateRequest(request) {
+                  onSuccess(updateBankAccount(id, request)) {
+                    case BankAccountBalanceUpdatedResponse(Success(account)) =>
+                      complete(StatusCodes.OK, account)
+                    case BankAccountBalanceUpdatedResponse(Failure(exception)) =>
+                      complete(StatusCodes.NotFound, FailureResponse(exception.getMessage))
+                  }
+                }
               }
             }
-          }
         }
     }
 }
