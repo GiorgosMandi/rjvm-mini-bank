@@ -111,7 +111,6 @@ class BankRoutes(bank: ActorRef[Command])(implicit system: ActorSystem[_]) {
                  - expect a reply
                  - send back a http response
                */
-              // todo validate request
               entity(as[BankAccountUpdateRequest]) { request =>
                 validateRequest(request) {
                   onSuccess(updateBankAccount(id, request)) {

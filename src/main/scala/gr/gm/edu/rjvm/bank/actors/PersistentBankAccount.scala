@@ -78,7 +78,6 @@ object PersistentBankAccount {
           .thenReply(bank)(_ => BankAccountCreatedResponse(id))
 
       case UpdateBalance(_, _, amount, replyTo) =>
-        // todo check for withdraw
         val newBalance = state.balance + amount
         if (newBalance < 0)
           Effect.reply(replyTo)(BankAccountBalanceUpdatedResponse(Failure(new RuntimeException("Amount exceeds available budget."))))
